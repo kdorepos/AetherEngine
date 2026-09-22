@@ -95,13 +95,46 @@ final class MP4SegmentMuxer {
         let timeBase: AVRational
         /// AE#458: ISO 639-2/T for the track's `mdhd`. Nil writes nothing, leaving movenc's `und`.
         let language: String?
+        /// True when the muxed packets are the SOURCE bitstream, not an encoder's output. The
+        /// `dec3` rewrite (see `InitSegmentDec3Rewrite`) is scoped to this: a bridged track's
+        /// frames come from the AudioBridge encoder, which emits no dependent substream and no
+        /// JOC, so its box is already right and must not be touched.
+        let isStreamCopy: Bool
+        /// The engine's own JOC verdict for the SOURCE track (`AVCodecParameters.profile == 30`,
+        /// which FFmpeg's AC-3 decoder sets only after it has seen the extension). Used purely as
+        /// a fallback when the bitstream walk cannot reach the dependent substream's `addbsi`.
+        let isAtmosStreamCopy: Bool
 
         init(codecpar: UnsafePointer<AVCodecParameters>,
              timeBase: AVRational,
-             language: String? = nil) {
+             language: String? = nil,
+             isStreamCopy: Bool = false,
+             isAtmosStreamCopy: Bool = false) {
             self.codecpar = codecpar
             self.timeBase = timeBase
             self.language = language
+            self.isStreamCopy = isStreamCopy
+            self.isAtmosStreamCopy = isAtmosStreamCopy
+        }
+    }
+
+    /// Shared, reference-typed carrier for the first muxed E-AC-3 packet.
+    ///
+    /// Reference-typed for the same reason `ByteCounter` is: the `FragmentSplitter` closure that
+    /// receives the init bytes is built during `init`, before `self` exists, so it cannot capture
+    /// the muxer. It captures this instead, and `writePacket` fills it in.
+    final class EAC3InitWitness {
+        /// Raw bytes of one muxed audio packet: an independent syncframe immediately followed by
+        /// its dependent syncframe(s). One packet is all `EAC3Bitstream` needs.
+        var firstAudioPacket: [UInt8] = []
+        var isStreamCopiedEAC3 = false
+        var jocDetectedByEngine = false
+
+        /// Keep the FIRST packet only. Later packets describe the same substream layout, and a
+        /// growing copy in a long session would be pure waste.
+        func noteAudioPacket(_ bytes: UnsafePointer<UInt8>, count: Int) {
+            guard isStreamCopiedEAC3, firstAudioPacket.isEmpty, count > 0 else { return }
+            firstAudioPacket = [UInt8](UnsafeBufferPointer(start: bytes, count: count))
         }
     }
 
@@ -229,6 +262,10 @@ final class MP4SegmentMuxer {
 
     private let splitter: FragmentSplitter
 
+    /// Carrier for the first muxed E-AC-3 packet, read by the init-capture closure. See
+    /// `EAC3InitWitness`.
+    private let eac3Witness: EAC3InitWitness
+
     // MARK: - Init
 
     /// Build the session-long muxer, opening its first segment file.
@@ -280,6 +317,16 @@ final class MP4SegmentMuxer {
         counter.fd = firstFd
         self.byteCounter = counter
 
+        // Same trick for the E-AC-3 bitstream the `dec3` rewrite needs: the splitter closure below
+        // cannot capture `self`, so it captures this and reads whatever `writePacket` has put in it.
+        // By the time the header completes, an audio packet has necessarily been written -- moov
+        // cannot be flushed before one is (`audioNeedsParsedPacketForMoov`, the #92 wedge guard).
+        let witness = EAC3InitWitness()
+        witness.isStreamCopiedEAC3 = (audio?.isStreamCopy ?? false)
+            && audio?.codecpar.pointee.codec_id == AV_CODEC_ID_EAC3
+        witness.jocDetectedByEngine = audio?.isAtmosStreamCopy ?? false
+        self.eac3Witness = witness
+
         self.splitter = FragmentSplitter(
             onHeaderComplete: { initBytes in
                 // AE#187 defense-in-depth: strip a zero-sample video `sdtp` from the fragmented init before
@@ -288,7 +335,34 @@ final class MP4SegmentMuxer {
                 // 7.1.5 shadowing the vendored build), whose init Apple TV would otherwise reject.
                 let clean = HLSVideoEngine.stripEmptyVideoSampleDependencyBox(fromInit: [UInt8](initBytes))
                     .map { Data($0) } ?? initBytes
-                onInitCaptured(clean)
+
+                // E-AC-3 JOC with a DEPENDENT substream: movenc writes `chan_loc = 0` and no JOC
+                // extension, so tvOS decodes the 5.1 bed and the receiver reports PCM. Re-derive the
+                // box from the bitstream this muxer just wrote. Conservative by construction -- see
+                // `InitSegmentDec3Rewrite`; anything other than a clean, disagreeing parse forwards
+                // `clean` unchanged.
+                switch InitSegmentDec3Rewrite.rewrite(
+                    initBytes: [UInt8](clean),
+                    audioBitstream: witness.firstAudioPacket,
+                    isStreamCopiedEAC3: witness.isStreamCopiedEAC3,
+                    jocDetectedByEngine: witness.jocDetectedByEngine
+                ) {
+                case .success(let rewrite):
+                    EngineLog.emit(InitSegmentDec3Rewrite.logLine(rewrite), category: .session)
+                    onInitCaptured(Data(rewrite.bytes))
+                case .failure(let skip):
+                    // Only the cases that mean "this IS a JOC track and we still did nothing" are
+                    // worth a line; the rest are the ordinary AAC/bridged/no-audio paths.
+                    if witness.isStreamCopiedEAC3, skip != .alreadyCorrect {
+                        EngineLog.emit(
+                            "[InitSegmentDec3Rewrite] dec3 left untouched (\(skip)); "
+                            + "audio bitstream \(witness.firstAudioPacket.count) B, "
+                            + "head=[\(InitSegmentDec3Rewrite.hex(Array(witness.firstAudioPacket.prefix(16))))]",
+                            category: .session
+                        )
+                    }
+                    onInitCaptured(clean)
+                }
             },
             onFragmentBytes: { ptr, count in
                 guard !counter.writeFailed, counter.fd >= 0 else { return }
@@ -646,6 +720,14 @@ final class MP4SegmentMuxer {
             av_shrink_packet(packet, Int32(complete))
         }
 
+        // Copy the first stream-copied E-AC-3 packet for the `dec3` rewrite BEFORE handing it over:
+        // `av_interleaved_write_frame` takes ownership and returns the packet blank, so afterwards
+        // `data`/`size` are gone. No-op for every other codec and for a bridged track (the witness
+        // refuses), and it keeps one packet, not a growing copy (see `EAC3InitWitness`).
+        if streamIndex == audioOutputStreamIndex, let data = packet.pointee.data, packet.pointee.size > 0 {
+            eac3Witness.noteAudioPacket(data, count: Int(packet.pointee.size))
+        }
+
         // av_write_frame was tried as a leak hypothesis; no impact on 8 MB/s mallocMB growth
         // (leak was Data(d) dispatch_data aliasing in AVIOReader). Reverted to interleaved for
         // cross-stream DTS monotonicity and audio+video re-ordering via libavformat.
@@ -723,6 +805,12 @@ final class MP4SegmentMuxer {
                 category: .session
             )
             return
+        }
+
+        // AE#222: this frame is genuine source audio and it is the one movenc parses to build the
+        // sample entry, so it is exactly the bitstream the `dec3` rewrite must be derived from.
+        frame.withUnsafeBufferPointer { buf in
+            if let base = buf.baseAddress { eac3Witness.noteAudioPacket(base, count: buf.count) }
         }
 
         var pktOpt: UnsafeMutablePointer<AVPacket>? = av_packet_alloc()
