@@ -1829,6 +1829,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // video-only must not advertise an audio rendition that is not in the segments, and must not
         // force the master for one either.
         let servedAudioLanguage = savedAudioConfig != nil ? audioLanguage : nil
+        // Same gate, for the rendition's CHANNELS: read the count off the config the MUXER got, so a
+        // bridged track reports the encoder's layout rather than the source's. `audioIsAtmosStreamCopy`
+        // is latched from the source probe (profile 30 = JOC) before the cascade runs, so it is still
+        // true on a source whose stream-copy was rejected and bridged to FLAC; objects do not survive
+        // that, hence the `.streamCopy` conjunct. Without it a downgraded session would advertise
+        // `CHANNELS="16/JOC"` over a FLAC bed, which is worse than saying nothing.
+        let servedAudioChannels: Int? = savedAudioConfig.map {
+            Int($0.codecpar.pointee.ch_layout.nb_channels)
+        }
+        let servedAudioIsAtmosStreamCopy =
+            audioIsAtmosStreamCopy && audioDelivery == .streamCopy && savedAudioConfig != nil
 
         // 7. Wire provider, server, and URL.
         let manifestCodecs = audioHLSCodecs.map { "\(primaryCodecs),\($0)" } ?? primaryCodecs
@@ -1857,6 +1868,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             hdcpLevel: hdcpLevel,
             sourceBitrate: sourceBitrate,
             audioLanguage: servedAudioLanguage,
+            audioChannelCount: servedAudioChannels,
+            audioIsAtmosStreamCopy: servedAudioIsAtmosStreamCopy,
             isLive: isLiveSession,
             // Sequential archives: playlist grows with the producer's REAL cut durations. The
             // static plan's uniform EXTINF lies whenever the archive's GOP cadence does not

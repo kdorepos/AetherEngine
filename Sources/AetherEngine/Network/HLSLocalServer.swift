@@ -80,6 +80,14 @@ protocol HLSSegmentProvider: AnyObject {
     /// untagged source gets. A muxed rendition carries no URI: the audio is inside the variant.
     var masterAudioRendition: (language: String, name: String)? { get }
 
+    /// CHANNELS for that same EXT-X-MEDIA tag, nil to omit it. Apple's HLS Authoring Spec makes the
+    /// attribute REQUIRED on an audio rendition, and Dolby's DD+ delivery kit makes it the ONLY
+    /// playlist-level statement that a rendition carries objects: `"<n>/JOC"` (n = the JOC object
+    /// count, `complexity_index_type_a`) for E-AC-3 + JOC, a bare channel count otherwise. Without it
+    /// AVFoundation has nothing above the segment layer that says "object audio" and settles on the
+    /// bed, which is how an Atmos stream-copy reached an Atmos-capable receiver as 5.1 PCM.
+    var masterAudioChannels: String? { get }
+
     /// Native subtitle renditions (#15): one per text track, for the master EXT-X-MEDIA:TYPE=SUBTITLES tags
     /// and the /subs_{N} endpoints. Empty unless prepareNativeSubtitles is on and the cue stores are threaded.
     /// NAMEs must be unique within the group (duplicates collapse AVFoundation's legible options).
@@ -154,6 +162,7 @@ extension HLSSegmentProvider {
     var masterHDCPLevel: String? { nil }
     var masterClosedCaptions: String? { nil }
     var masterAudioRendition: (language: String, name: String)? { nil }
+    var masterAudioChannels: String? { nil }
     var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String, isForced: Bool)] { [] }
     var nativeSubtitleDefaultOrdinal: Int { 0 }
     var nativeSubtitleWholeProgram: Bool { false }
@@ -1425,10 +1434,18 @@ final class HLSLocalServer: @unchecked Sendable {
             streamInfAttrs.append("CLOSED-CAPTIONS=\(cc)")
         }
         if let audio = audioRendition {
-            let audioAttrs = [
+            var audioAttrs = [
                 "TYPE=AUDIO", "GROUP-ID=\"aud\"", "NAME=\"\(audio.name)\"",
                 "LANGUAGE=\"\(audio.language)\"", "DEFAULT=YES", "AUTOSELECT=YES",
             ]
+            // CHANNELS is where object audio is declared to AVFoundation. The CODECS string stays
+            // `ec-3` (#34: never `ec+3`), and the per-segment `dec3` box is below the playlist layer,
+            // so this tag is the only place the master can say the rendition is Atmos. Dolby's DD+
+            // Online Delivery Kit and the Apple HLS Authoring Spec both spell it
+            // `CHANNELS="16/JOC"`; a non-JOC track gets its plain bed count.
+            if let channels = provider.masterAudioChannels {
+                audioAttrs.append("CHANNELS=\"\(channels)\"")
+            }
             lines.append("#EXT-X-MEDIA:\(audioAttrs.joined(separator: ","))")
         }
 

@@ -571,6 +571,13 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// AE#458: ISO 639-2/T of the ONE audio track muxed into the variant, for the master's
     /// EXT-X-MEDIA:TYPE=AUDIO tag. Nil for a source whose audio carries no resolvable language.
     private let audioLanguage: String?
+    /// Channel count of the audio track as it is SERVED (the muxer's codecpar, so a bridged track
+    /// reports the encoder's layout, not the source's). Drives CHANNELS on the audio rendition.
+    private let audioChannelCount: Int?
+    /// The served audio is a stream-copied E-AC-3 JOC bitstream, i.e. the objects survived into the
+    /// segments. Only then may the rendition claim `"<n>/JOC"`; a JOC source that fell back to the
+    /// FLAC bridge has lost its objects and must advertise its bed count like any other track.
+    private let audioIsAtmosStreamCopy: Bool
 
     /// #15: native subtitle cue stores (one per text track) for the WebVTT rendition served to AVPlayer.
     /// Immutable references; each store is internally locked and filled lazily by the readers on selection.
@@ -767,6 +774,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         hdcpLevel: String?,
         sourceBitrate: Int64,
         audioLanguage: String? = nil,
+        audioChannelCount: Int? = nil,
+        audioIsAtmosStreamCopy: Bool = false,
         isLive: Bool = false,
         sequentialAppendPlaylist: Bool = false,
         liveWindowSizing: LiveWindowSizing = LiveWindowSizing(targetSegmentDurationSeconds: 4.0, dvrWindowSeconds: nil),
@@ -810,6 +819,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.hdcpLevel = hdcpLevel
         self.sourceBitrate = sourceBitrate
         self.audioLanguage = audioLanguage
+        self.audioChannelCount = audioChannelCount
+        self.audioIsAtmosStreamCopy = audioIsAtmosStreamCopy
         self.restartHandler = restartHandler
         self.unrecoverableGapHandler = unrecoverableGapHandler
         self.restartActivity = restartActivity
@@ -2522,6 +2533,20 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         guard let audioLanguage else { return nil }
         let name = Locale.current.localizedString(forIdentifier: audioLanguage) ?? audioLanguage
         return (language: audioLanguage, name: name)
+    }
+
+    /// Apple HLS Authoring Spec 2.13 ("CHANNELS ... MUST be present") plus Dolby's DD+ Online
+    /// Delivery Kit: the value is the count of decodable objects, a slash, then `JOC`. 16 is the
+    /// object count Dolby's own Atmos masters and Apple's examples carry, and it is what the engine
+    /// can state without the JOC complexity index, which FFmpeg's `handle_eac3` reads from the
+    /// independent substream only and therefore leaves at 0 for this class of source.
+    /// A stream that is not object audio gets its plain served channel count, which is equally
+    /// required and equally absent before this.
+    var masterAudioChannels: String? {
+        guard audioLanguage != nil else { return nil }   // no rendition tag, nothing to attribute
+        if audioIsAtmosStreamCopy { return "16/JOC" }
+        guard let n = audioChannelCount, n > 0 else { return nil }
+        return String(n)
     }
 
     // MARK: - Native subtitle renditions (#15)
