@@ -1874,6 +1874,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     throw HLSVideoEngineError.openFailed(reason: "audio codecpar copy failed")
                 }
                 ownedCodecParams.append(ownedAudioParams)
+                // Hoisted above the config so the muxer's `dec3` rewrite can be told about JOC.
+                // Same expression as the `isJOC` the log line below prints (profile 30 ==
+                // FFmpeg's AV_PROFILE_EAC3_DDP_ATMOS, set by the AC-3 parser only once it has seen
+                // the extension); `prepareAACForFMP4` above cannot touch an E-AC-3 profile.
+                let isJOC = compat == .eac3 && audioStream.pointee.codecpar.pointee.profile == 30
                 streamCopyAudio = HLSSegmentProducer.AudioConfig(
                     codecpar: UnsafePointer(ownedAudioParams.ptr),
                     timeBase: audioStream.pointee.time_base,
@@ -1882,7 +1887,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     sourceTimeBase: audioStream.pointee.time_base,
                     bridge: nil,
                     stripAacAdts: stripAdts,
-                    language: audioLanguage
+                    language: audioLanguage,
+                    isAtmosStreamCopy: isJOC
                 )
                 // Audio fallback duration from codec-fixed frame sizes (AC3/EAC3=1536, AAC=1024).
                 let acp = audioStream.pointee.codecpar.pointee
@@ -1909,7 +1915,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 // signaling lives in the per-segment `dec3` box, not the CODECS string (#34).
                 // The only EAC3 case that can't stream-copy is EAC3-from-MKV without dec3 extradata;
                 // `probeWriteHeader` in buildProducerWithAudioCascade catches and bridges that.
-                let isJOC = compat == .eac3 && acp.profile == 30
                 audioIsAtmosStreamCopy = isJOC
                 audioHLSCodecs = compat.hlsCodecsString
                 EngineLog.emit(

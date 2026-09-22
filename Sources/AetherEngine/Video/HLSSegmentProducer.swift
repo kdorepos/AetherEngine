@@ -99,6 +99,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
         /// AE#458: the source track's language as ISO 639-2/T, carried into every muxer this config builds
         /// (a producer restart rebuilds one, so it has to live on the config, not on the first muxer).
         let language: String?
+        /// The engine's JOC verdict for the SOURCE track (E-AC-3 `AVCodecParameters.profile == 30`).
+        /// Carried here for the same reason `language` is: a restart rebuilds the muxer, and the
+        /// `dec3` rewrite in every one of them needs it as its fallback JOC signal.
+        let isAtmosStreamCopy: Bool
 
         init(codecpar: UnsafePointer<AVCodecParameters>,
              timeBase: AVRational,
@@ -107,7 +111,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
              sourceTimeBase: AVRational,
              bridge: AudioBridge?,
              stripAacAdts: Bool = false,
-             language: String? = nil) {
+             language: String? = nil,
+             isAtmosStreamCopy: Bool = false) {
             self.codecpar = codecpar
             self.timeBase = timeBase
             self.sourceStreamIndex = sourceStreamIndex
@@ -116,6 +121,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             self.bridge = bridge
             self.stripAacAdts = stripAacAdts
             self.language = language
+            self.isAtmosStreamCopy = isAtmosStreamCopy
         }
     }
 
@@ -2146,7 +2152,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
             nalFramingLatch: isAdCreative ? nil : videoConfig.nalFramingLatch
         )
         let muxerAudio: MP4SegmentMuxer.AudioConfig? = audioConfig.map { a in
-            MP4SegmentMuxer.AudioConfig(codecpar: a.codecpar, timeBase: a.inputTimeBase, language: a.language)
+            // `bridge == nil` IS the stream-copy test: a bridged config's codecpar is the encoder's,
+            // so the muxed frames are not the source bitstream and the `dec3` rewrite must stay out.
+            MP4SegmentMuxer.AudioConfig(
+                codecpar: a.codecpar,
+                timeBase: a.inputTimeBase,
+                language: a.language,
+                isStreamCopy: a.bridge == nil,
+                isAtmosStreamCopy: a.isAtmosStreamCopy
+            )
         }
 
         do {

@@ -312,6 +312,33 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("| Swift | 6.4 |", docs)
     }
 
+    // MARK: - The dec3 payload the Atmos section quotes
+
+    /// docs/formats.md prints both `dec3` payloads of the measured 5.1.2 source and the `chan_loc`
+    /// the rewrite derives for it. Those hex strings are the whole evidence of the paragraph: a
+    /// reader checks the engine's claim about FFmpeg's box by comparing them byte for byte, so a
+    /// change in the chanmap bit order or in the extension encoding has to move the prose with it.
+    func testDec3ChanLocMappingIsWhatTheDocsSay() throws {
+        let docs = try documentation()
+
+        // chan_loc bit k is chanmap transmission bit k+5, across nine bits. 0xA010 is L + R +
+        // Lvh/Rvh; L and R fall outside chan_loc's range, so only the height pair survives.
+        XCTAssertEqual(EAC3Bitstream.chanLoc(fromChanmap: 0xA010), 0x040,
+                       "documented as chan_loc 0x040, the Lvh/Rvh pair")
+        assertDocumented("`chanmap = 0xA010`", docs)
+        assertDocumented("`14 00 0C 0F 02 00` to `14 00 0C 0F 02 40 01 10`", docs)
+        assertDocumented("`chan_loc` becomes `0x040`", docs)
+
+        // The control: a source whose JOC sits in the independent substream re-encodes to exactly
+        // the payload FFmpeg already wrote, which is what makes the "nothing to do" arm reachable.
+        let independent: [UInt8] = [0x20, 0x00, 0x20, 0x0F, 0x00, 0x01, 0x10]
+        let parsed = try XCTUnwrap(EC3SpecificBox.parse(payload: independent),
+                                   "the documented 6-channel control payload must parse")
+        XCTAssertEqual(parsed.encodePayload(), independent,
+                       "documented as re-deriving to the payload FFmpeg already wrote")
+        assertDocumented("`20 00 20 0F 00 01 10`", docs)
+    }
+
     /// The docs corpus is README + docs/; a claim living in a source docstring is read straight.
     private func sourceFile(_ relativePath: String) throws -> String {
         guard let text = try? String(contentsOf: Self.repoRoot.appendingPathComponent(relativePath),

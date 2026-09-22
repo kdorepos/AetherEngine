@@ -886,6 +886,22 @@ Second full audit of the engine (2026-09-29, against 7.22.2): about 107 verified
   cursor is never moved, so playback reads on undisturbed. A target past what is retained answers
   nil rather than the frame before it. `supportsCacheBackedStills` is true for such a session, and
   now also for a software live session, which already served stills but reported false.
+- **A Dolby Digital Plus track whose objects live in a dependent substream keeps its channels and its
+  JOC metadata.** FFmpeg's `movenc.c: handle_eac3()` describes that shape -- a Blu-ray-style AC-3 core
+  syncframe followed by an E-AC-3 dependent syncframe -- as a bare 5.1 bed. It writes `chan_loc = 0`,
+  because it derives the field from the dependent substream's `chanmap` with a shift and mask that do
+  not match ETSI TS 102 366 F.6.2.3's bit order, and it omits the TS 103 420 extension entirely,
+  because `complexity_index_type_a` is latched from the independent substream header before the
+  dependent-substream loop and that loop never copies it back (cf. jellyfin/jellyfin-ffmpeg#584). tvOS
+  cannot map a dependent substream it has not been told the channels of, so it decoded the 5.1 core and
+  an Atmos-capable receiver reported multichannel PCM. FFmpegBuild ships prebuilt xcframeworks with no
+  C sources, so the muxer is not reachable from here; the `dec3` box is instead re-derived from the
+  audio bitstream the muxer just wrote and spliced into the captured init segment, with the `size`
+  field of every ancestor box reconciled. Measured on a 5.1.2 source (`chanmap = 0xA010`), the payload
+  goes from `14 00 0C 0F 02 00` to `14 00 0C 0F 02 40 01 10` and `init.mp4` from 1339 to 1341 bytes. It
+  is gated hard -- stream-copied E-AC-3 only, both the box and the bitstream must parse and agree about
+  the bed, and the re-encoded payload must actually differ -- so a source FFmpeg already describes
+  correctly is left byte-identical, and `AETHER_DISABLE_DEC3_REWRITE` turns it off entirely.
 
 ## [7.14.0] - 2026-09-22
 
