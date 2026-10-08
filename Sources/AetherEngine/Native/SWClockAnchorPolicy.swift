@@ -11,6 +11,11 @@ import Foundation
 /// sample PTS is the only way they ever present. `sessionZeroSeconds` is the offset
 /// the host subtracts from the raw synchronizer clock so the published position
 /// stays session-relative; the raw clock itself remains the source/subtitle axis.
+///
+/// Only a sample AHEAD of the anchor moves it (AE#724). A resume repositions to the keyframe at or
+/// before its target, so its first audio arrives up to a whole GOP early (9.984 s for a 17.3 s
+/// resume on a 10 s GOP); the video skip threshold and the synchronizer discard that preroll, and
+/// a clock moved back onto it published the viewer seconds behind the resume point.
 enum SWClockAnchorPolicy {
     /// Tolerance below which the first sample is considered aligned with the load
     /// anchor. Head-of-stream offsets are a few hundred ms; mid-stream joins are
@@ -26,7 +31,7 @@ enum SWClockAnchorPolicy {
                         firstSampleSeconds: Double,
                         toleranceSeconds: Double = SWClockAnchorPolicy.toleranceSeconds) -> Resolution {
         guard firstSampleSeconds.isFinite,
-              abs(firstSampleSeconds - initialSeconds) > toleranceSeconds else {
+              firstSampleSeconds - initialSeconds > toleranceSeconds else {
             return Resolution(anchorSeconds: initialSeconds, sessionZeroSeconds: 0)
         }
         return Resolution(anchorSeconds: firstSampleSeconds,
