@@ -1184,6 +1184,9 @@ final class SoftwarePlaybackHost {
     }
 
     var clockRateForTesting: Float? { audioOutput?.rate }
+    /// The raw synchronizer clock (source axis), read straight from the output rather than from the
+    /// 0.25 s published tick.
+    var clockSecondsForTesting: Double? { audioOutput?.currentTimeSeconds }
     #endif
 
     /// AE#549: re-anchor a master clock that stopped without a pause of ours, where it stands.

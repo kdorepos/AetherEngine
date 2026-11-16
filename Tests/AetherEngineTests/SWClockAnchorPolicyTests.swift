@@ -82,6 +82,16 @@ struct SWClockAnchorPolicyTests {
         #expect(r.sessionZeroSeconds == 0)
     }
 
+    @Test("a start just before a keyframe keeps its anchor through the whole GOP's lead-in")
+    func startBeforeKeyframeKeepsAnchor() {
+        // Lumen's return from the Home Screen on the tvOS Simulator: a 10.43 s GOP, the reload
+        // read from the keyframe at 26.528 s for a start at 35.155 s. Moving the clock there
+        // played 8.6 s of sound over no picture.
+        let r = SWClockAnchorPolicy.resolve(initialSeconds: 35.155, firstSampleSeconds: 26.528)
+        #expect(r.anchorSeconds == 35.155)
+        #expect(r.sessionZeroSeconds == 0)
+    }
+
     @Test("a large negative first PTS on a cold start keeps the zero anchor")
     func largeNegativeFirstPts() {
         let r = SWClockAnchorPolicy.resolve(initialSeconds: 0, firstSampleSeconds: -5)
